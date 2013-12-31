@@ -208,6 +208,38 @@ sub parse_netmask {
     return @ips;
 }
 
+sub expand_hosts {
+    my ($pat) = @_;
+
+    # myhost-{01-04} -> myhost-01,myhost-02,myhost-03,myhost-04
+    # myhost-{01,02}-foo -> myhost-01-foo,myhost-02-foo
+
+    if ($pat =~ /(\{([^}]+)\})/) {
+        my $replace = $1;
+        my $pattern = $2;
+        my @patternParts = split(/\s*,\s*/, $2);
+        my @hosts = ();
+        foreach my $patternPart (@patternParts) {
+            if ($patternPart =~ /^([a-zA-Z0-9]+)-([a-zA-Z0-9]+)$/) {
+                my $seqStart = $1;
+                my $seqEnd = $2;
+                foreach my $seq ($seqStart..$seqEnd) {
+                    my $host = $pat;
+                    $host =~ s/\{[^}]*\}/$seq/g;
+                    push(@hosts, $host);
+                }
+            } else {
+                my $host = $pat;
+                $host =~ s/\{[^}]*\}/$patternPart/g;
+                push(@hosts, $host);
+            }
+        }
+        return \@hosts;
+    } else {
+        return [ $pat ];
+    }
+}
+
 sub expand_hostrange {
     my ($pat) = @_;
 
@@ -254,53 +286,56 @@ sub all_hosts {
     }
 
     while (my $arg = shift @ARGV) {
-        if (my $clusthosts = $obj->{clusters}->{$arg}) {
-            print "Expand cluster: $arg => @$clusthosts\n" if $config->debug;
-            push @ARGV, @$clusthosts;
-        } elsif (my $rangehosts = expand_hostrange($arg)){
-            print "Expand host range: $arg => @$rangehosts\n" if $config->debug;
-            push @ARGV, @$rangehosts;
-        } else {
-
-            print "Host: $arg\n" if $config->debug;
-
-            $arg = CsshX::Host->new($arg) unless ref $arg;
-
-            if ($ping) {
-                my ($user, $host, $port) = CsshX::Process->parse_user_host_port($arg->name);
-                $port ||= getservbyname('ssh', 'tcp') || 22;
-
-                # We cannot identify 'ack's by port, so we have one ping object for each
-                unless ($ping->{$port}) {
-                    $ping->{$port} = Net::Ping->new("syn", $config->ping_timeout);
-                    $ping->{$port}->service_check(1);
-                    $ping->{$port}->{port_num} = $port;
-                    $ping_map->{$port} = {};
-                }
-
-                # Multiple user@host's may be used so map users to host,port
-                unless ($ping_map->{$port}->{$host}) {
-                    $ping_map->{$port}->{$host} = [];
-                    eval {
-                        $ping->{$port}->ping("$host");
-                    }; if ($@) {
-                        if ($@ =~ /Too many open files/) {
-                            # Handle a batch of pings to free file handles
-                            push @hosts, process_pings($ping,$ping_map);
-                        } else {
-                            die "ping_test failed: $@";
-                        }
-                    }
-                }
-
-                push @{$ping_map->{$port}->{$host}}, $arg;
-
+        my $expanded = expand_hosts($arg);
+        foreach my $arg (@{$expanded}) {
+            if (my $clusthosts = $obj->{clusters}->{$arg}) {
+               print "Expand cluster: $arg => @$clusthosts\n" if $config->debug;
+               push @ARGV, @$clusthosts;
+            } elsif (my $rangehosts = expand_hostrange($arg)){
+                print "Expand host range: $arg => @$rangehosts\n" if $config->debug;
+                push @ARGV, @$rangehosts;
             } else {
 
-                push @hosts, $arg;
-                if (@hosts > $config->session_max) {
-                    die "Too many hosts. Use --session_max if you need more, ".
-                        "or --ping_test to only connect to ones that are up";
+                print "Host: $arg\n" if $config->debug;
+
+                $arg = CsshX::Host->new($arg) unless ref $arg;
+
+                if ($ping) {
+                    my ($user, $host, $port) = CsshX::Process->parse_user_host_port($arg->name);
+                    $port ||= getservbyname('ssh', 'tcp') || 22;
+
+                    # We cannot identify 'ack's by port, so we have one ping object for each
+                    unless ($ping->{$port}) {
+                        $ping->{$port} = Net::Ping->new("syn", $config->ping_timeout);
+                        $ping->{$port}->service_check(1);
+                        $ping->{$port}->{port_num} = $port;
+                        $ping_map->{$port} = {};
+                    }
+
+                    # Multiple user@host's may be used so map users to host,port
+                    unless ($ping_map->{$port}->{$host}) {
+                        $ping_map->{$port}->{$host} = [];
+                        eval {
+                            $ping->{$port}->ping("$host");
+                        }; if ($@) {
+                            if ($@ =~ /Too many open files/) {
+                                # Handle a batch of pings to free file handles
+                                push @hosts, process_pings($ping,$ping_map);
+                            } else {
+                                die "ping_test failed: $@";
+                            }
+                        }
+                    }
+
+                    push @{$ping_map->{$port}->{$host}}, $arg;
+
+                } else {
+
+                    push @hosts, $arg;
+                    if (@hosts > $config->session_max) {
+                        die "Too many hosts. Use --session_max if you need more, ".
+                            "or --ping_test to only connect to ones that are up";
+                    }
                 }
             }
         }
